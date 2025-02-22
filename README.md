@@ -8,9 +8,9 @@ See [DensoSVIC/soafee-avp-blueprint](https://github.com/DensoSVIC/soafee-avp-blu
 
 1. Saroush Bateni
 1. Christian Menard
-1. Jeff C. Jensen
 1. Erling Jellum
 1. Peter Donovan
+1. Jeff C. Jensen
 
 The initial port of the Autoware.Auto Autonomous Valet Parking Demonstration to Lingua Franca 
 was first published here:
