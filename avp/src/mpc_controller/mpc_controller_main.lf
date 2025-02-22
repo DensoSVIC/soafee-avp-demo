@@ -1,0 +1,137 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp", "websocket_server_sync.hpp"]
+};
+
+preamble {= 
+    #include "mpc_controller_nodes/mpc_controller_node.hpp" /* This is AUTOWARE node */
+    #include "controller_common/controller_base.hpp" /* This is AUTOWARE node */
+    #include "utils.hpp"
+    #include "constants.hpp"
+    #include "websocket_server_sync.hpp"
+=}
+
+// We use an STP_offset of 10 msec to not prematurely handle any events since
+// we depend on the simultaneity of trajectory and vehicle_kinematic_state.
+reactor mpc_controller(STP_offset = 10 msec, use_safety_island:bool = false) {
+    input trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    input vehicle_kinematic_state:std::shared_ptr<autoware_auto_msgs::msg::VehicleKinematicState>;
+    
+    output command:std::shared_ptr<autoware_auto_msgs::msg::VehicleControlCommand>;
+    
+    state sequence_number:uint32_t;
+    state ros2_node: std::shared_ptr<motion::control::mpc_controller_nodes::MpcControllerNode>;
+    state spin_thread: std::thread;
+    state input_ws_t: ws_msg_t;
+    state output_ws_t: ws_msg_t;
+    state args: ws_args_t;
+
+    // This physical action is used to run the ROS2 node synchronously, but
+    // without slowing down logical time. 90 msec is chosen to not aligned with
+    // the 100 msec control loop.
+    physical action ros_spin(90 msec)
+
+    method runSafetyIsland() {=
+        self->input_ws_t.accel = self->ros2_node->cmd.long_accel_mps2;
+        self->input_ws_t.steer = self->ros2_node->cmd.front_wheel_angle_rad;
+        self->input_ws_t.ready = true;
+
+        printf("Sending %f %f\n", self->input_ws_t.accel, self->input_ws_t.steer);
+        self->output_ws_t.ready = false;
+        while (self->output_ws_t.ready == false) {
+            lf_sleep(USEC(1));
+        }
+        self->output_ws_t.ready = false; 
+        printf("Received %f %f\n",  self->output_ws_t.accel , self->output_ws_t.steer);
+
+        self->ros2_node->cmd.front_wheel_angle_rad = self->output_ws_t.steer;
+        self->ros2_node->cmd.long_accel_mps2 = self->output_ws_t.accel;
+    =}
+
+    reaction (startup) -> ros_spin {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + MPC_CONTROLLER_PARAM;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        
+        self->ros2_node = std::make_shared<motion::control::mpc_controller_nodes::MpcControllerNode>(
+            "mpc_controller", 
+            "",
+            nodeOptions
+        );
+        self->sequence_number = 0;
+
+        if(self->use_safety_island) {
+            pthread_t ws_thread;
+            self->args.input = &self->input_ws_t;
+            self->args.output = &self->output_ws_t;
+            pthread_create(&ws_thread, NULL, &start, &self->args);
+        }
+        
+        lf_schedule(ros_spin, MSEC(0));
+    =}
+
+    
+    // This reaction is based on having logically simultanous vehicle_kinematic_state and trajectory.
+    // In decentralized execution this might not always be possible. Thus we need some initial 
+    // error checking before handling the values. If one is missing, we use the previous one.
+    reaction (vehicle_kinematic_state, trajectory) -> command {=
+        if (vehicle_kinematic_state->is_present && trajectory->is_present) {
+            // We got both simultanous events. 
+            self->ros2_node->on_trajectory(trajectory->value);
+            self->ros2_node->on_state(vehicle_kinematic_state->value);
+        } else if (vehicle_kinematic_state->is_present && trajectory->value != NULL) {
+            // Trajectory is late, but we can use trajectory from last iteration.
+            self->ros2_node->on_state(vehicle_kinematic_state->value);
+        } else if (vehicle_kinematic_state->is_present && trajectory->value == NULL) {
+            // We have not yet seen the first trajectory. Skip
+        } else if (!vehicle_kinematic_state->is_present){
+            // We got a trajectory and not a kinematic state. This is unlikely.
+            // Lets reuse the old kinematic state then.
+            self->ros2_node->on_trajectory(trajectory->value);
+        }
+
+        if (self->ros2_node->cmd_is_set) {
+            if(self->use_safety_island) {
+                runSafetyIsland();
+            }
+            auto msg = std::make_shared<autoware_auto_msgs::msg::VehicleControlCommand>(self->ros2_node->cmd);
+            lf_set(command, msg);
+            self->ros2_node->cmd_is_set = false;
+        }
+    =} STP(0) {=
+        // An STP violation would mean that we have already run the mpc with stale input. Then we
+        // dont do anything. The value will be latched in the input port in case it is late
+        // the next round also.
+        instant_t intended_tag = trajectory->is_present ? trajectory->intended_tag.time : vehicle_kinematic_state->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `trajectory/kinematic_state`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+        lf_print_warning("trajectory=%d kinematic_state=%d",trajectory->is_present, vehicle_kinematic_state->is_present);
+    =} deadline(100 msec){=
+        // When the MPC controller receives a new trajectory it might spend a long time recomputing.
+        // This might lead to many events buffered on the event queue. Adding this deadline makes 
+        // sure that we discard events that are more than 10msec old.
+        lf_print_warning(PRINTF_TIME ": Deadline violation. Dropping incoming vehicle_kinematic_state/trajectories", lf_time_physical_elapsed());
+    =}
+
+    // Here we run the ros2 node synchronously because running it
+    // asynchronously in a thread yields a double free error. There is likely
+    // a race condition between the callbacks invoke by the ros executor and
+    // the callbacks our reactions invoke. 
+    reaction(ros_spin) -> ros_spin {=
+        rclcpp::spin_some(self->ros2_node);
+        lf_schedule(ros_spin, 0);
+    =}
+}
+
+main reactor {
+    mpc = new mpc_controller();
+}

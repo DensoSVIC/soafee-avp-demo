@@ -1,0 +1,103 @@
+target CCpp {
+    docker: {
+        builder-base: "openadkit",
+        rti-image: "xronosinc/rti:v0.9.0",
+        no-build: true,
+        pre-build-script: "container-environment.sh",
+        pre-run-script: "container-environment.sh",
+        env-file: env_file
+    },
+    coordination: decentralized,
+    files: [
+        "../Autoware-support",
+        "../cyclonedds.xml",
+        "../config"
+    ],
+    tracing: true,
+    trace-plugin: "telegraf_lf_trace_plugin"
+};
+
+// Import all the federates
+import filter_and_transform from "filter_and_transform/filter_and_transform_main.lf";
+import point_cloud_fusion from "point_cloud_fusion/point_cloud_fusion_main.lf";
+import voxel_grid_downsampler from "voxel_grid_downsampler/voxel_grid_downsampler_main.lf";
+import ray_ground_classifier from "ray_ground_classifier/ray_ground_classifier_main.lf";
+import euclidean_cluster_detector from "euclidean_cluster_detector/euclidean_cluster_detector_main.lf";
+import ndt_map_publisher from "ndt_map_publisher/ndt_map_publisher_main.lf";
+import p2d_ndt_localizer from "p2d_ndt_localizer/p2d_ndt_localizer_main.lf";
+import off_map_obstacles_filter from "off_map_obstacles_filter/off_map_obstacles_filter_main.lf";
+import lanelet2_map_provider from "lanelet2_map_provider/lanelet2_map_provider_main.lf"
+import behavior_planner from "behavior_planner/behavior_planner_main.lf";
+import parking_planner from "parking_planner/parking_planner_main.lf";
+import lane_planner from "lane_planner/lane_planner_main.lf";
+import global_planner from "global_planner/global_planner_main.lf";
+import object_collision_estimator from "object_collision_estimator/object_collision_estimator_main.lf";
+import lgsvl_interface from "lgsvl_interface/lgsvl_interface_main.lf";
+import mpc_controller from "mpc_controller/mpc_controller_main.lf";
+import robot_state_publisher from "robot_state_publisher/robot_state_publisher_main.lf";
+import lanelet2_map_visualizer from "lanelet2_map_visualizer/lanelet2_map_provider_visualizer.lf"
+import rviz2 from "rviz/rviz_main.lf"
+
+federated reactor Autoware {
+    // Instantiate all the federates
+    lanelet2_visualizer = new lanelet2_map_visualizer();
+    filter_and_transform = new[2] filter_and_transform();
+    point_cloud_fusion = new point_cloud_fusion(in_width = 2);
+    voxel_grid_downsampler = new voxel_grid_downsampler();
+    ray_ground_classifier = new ray_ground_classifier();
+    euclidean_cluster_detector = new euclidean_cluster_detector();
+    ndt_map_publisher = new ndt_map_publisher();
+    p2d_ndt_localizer = new p2d_ndt_localizer();
+    off_map_obstacles_filter = new off_map_obstacles_filter();
+    behavior_planner = new behavior_planner();
+    parking_planner = new parking_planner();
+    lane_planner = new lane_planner();
+    global_planner = new global_planner();
+    object_collision_estimator = new object_collision_estimator();
+    lgsvl_interface = new lgsvl_interface();
+    mpc_controller = new mpc_controller();
+    robot_state_publisher = new robot_state_publisher();
+    map_provider = new lanelet2_map_provider(num_requestors = 6);
+    rviz2 = new rviz2();
+    
+    // Connect the LiDAR processing pipeline
+	filter_and_transform.points_out -> point_cloud_fusion.points_in serializer "ros2";
+	(point_cloud_fusion.points_out)+ -> voxel_grid_downsampler.points_in, ray_ground_classifier.points_in serializer "ros2";
+	ray_ground_classifier.points_non_ground -> euclidean_cluster_detector.points_in serializer "ros2";
+	euclidean_cluster_detector.bounding_boxes -> off_map_obstacles_filter.original_bounding_boxes serializer "ros2";
+	ndt_map_publisher.points_out -> p2d_ndt_localizer.ndt_map_points_in after 250ms serializer "ros2";
+	voxel_grid_downsampler.points_out -> p2d_ndt_localizer.fused_downsampled_points_in serializer "ros2";
+    // 150 msec on connection to fusion federate off_map_obstacles_filter. Accounts for ~100msec processing delay
+    // of LiDAR point clouds.
+	off_map_obstacles_filter.modified_bounding_boxes -> object_collision_estimator.filtered_lidar_boxes after 150 msec serializer "ros2";
+	
+    // Connect the map provider to all map consumers. Physical connections are used here to avoid any STP violations.
+    lanelet2_visualizer.request, behavior_planner.map_request, lane_planner.request, parking_planner.request, global_planner.map_request, off_map_obstacles_filter.request ~> map_provider.request serializer "ros2";
+    map_provider.map ~> lanelet2_visualizer.map, behavior_planner.map, lane_planner.map, parking_planner.map, global_planner.map, off_map_obstacles_filter.map serializer "ros2";
+	
+    // Connect the simulator. Delay connection by 1 msec to avoid STP offsets at behavior_planner.
+	lgsvl_interface.vehicle_kinematic_state -> behavior_planner.vehicle_kinematic_state after 1 msec serializer "ros2";
+    lgsvl_interface.state_report -> behavior_planner.vehicle_state_report after 1 msec serializer "ros2";
+
+	lgsvl_interface.vehicle_kinematic_state -> global_planner.vehicle_kinematic_state serializer "ros2";
+    // 16 msec delay matches the accumulated delay of the vehicle_kinematic_state path through the behavior_planner.
+	lgsvl_interface.vehicle_kinematic_state-> mpc_controller.vehicle_kinematic_state after 16 msec serializer "ros2";
+	
+    // Connect planning and controller
+	behavior_planner.parking_route -> parking_planner.route serializer "ros2";
+	behavior_planner.lane_route -> lane_planner.route serializer "ros2";
+	// Add 39 msec to match accumulated delay for `vehicle_command`.
+    behavior_planner.vehicle_state_command -> lgsvl_interface.state_command after 39 msec serializer "ros2";
+	behavior_planner.control_trajectory -> mpc_controller.trajectory serializer "ros2";
+	lane_planner.trajectory ~> behavior_planner.lane_trajectory serializer "ros2";
+	parking_planner.trajectory ~> behavior_planner.parking_trajectory serializer "ros2";
+	behavior_planner.original_trajectory ->
+	    object_collision_estimator.original_trajectory serializer "ros2";
+    // 15 msec here should account for the accumulated lag until here to avoid
+    // STP violations in the behavior_planner
+	object_collision_estimator.modified_trajectory -> behavior_planner.modified_trajectory after 15 msec serializer "ros2";
+    global_planner.global_path ~> behavior_planner.global_path serializer "ros2";
+
+    // 24 msec to make the total E2E latency 40 msec.
+    mpc_controller.command -> lgsvl_interface.vehicle_command after 24 msec serializer "ros2";
+}

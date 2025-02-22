@@ -1,0 +1,62 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/constants.hpp", "../include/utils.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "lanelet2_core/LaneletMap.h"
+    #include "had_map_utils/had_map_conversion.hpp"
+    #include "had_map_utils/had_map_query.hpp"
+    #include "motion_common/motion_common.hpp"
+    #include "lane_planner_nodes/lane_planner_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor lane_planner {
+    input route:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+
+    output request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    output trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+	
+    state route_msg:autoware_auto_msgs::msg::Route;
+    
+    state ros2_node: std::shared_ptr<autoware::lane_planner_nodes::LanePlannerNode>
+
+    reaction (startup) {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + LANE_PLANNER_PARAM;
+
+        rclcpp::NodeOptions node_options = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            "/**"
+        );
+        self->ros2_node = std::make_shared<autoware::lane_planner_nodes::LanePlannerNode>(node_options);
+    =}
+
+    reaction (route) -> request {=
+        self->route_msg = *route->value;
+        auto request_msg = std::make_shared<autoware_auto_msgs::srv::HADMapService_Request>(
+        	self->ros2_node->create_map_request(self->route_msg));
+        	
+        lf_set(request, request_msg);
+	=} 
+
+    reaction (map) -> trajectory {=
+	    std::shared_ptr<lanelet::LaneletMap> lanelet_map_ptr = std::make_shared<lanelet::LaneletMap>();
+	    autoware::common::had_map_utils::fromBinaryMsg(*map->value, lanelet_map_ptr);
+
+        auto trajectory_msg = std::make_shared<autoware_auto_msgs::msg::Trajectory>(
+            self->ros2_node->plan_trajectory(self->route_msg, lanelet_map_ptr));
+        
+        // Only publish the trajectory if it is valid        
+        if (self->ros2_node->is_trajectory_valid(*trajectory_msg)) {	
+            lf_set(trajectory, trajectory_msg);
+        }
+	=} 
+}
+
+main reactor {
+    lp = new lane_planner();
+}

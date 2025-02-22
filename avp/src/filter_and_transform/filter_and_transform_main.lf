@@ -1,0 +1,84 @@
+/**
+ * Note: Please change AUTOWARE_HOME in include/CMakeListsExtension.txt to
+ * reflect your top-level AutowareAuto folder. You can do this by changing
+ * the follwoing line:
+ *
+ *     set(AUTOWARE_HOME /home/$ENV{USER}/Autoware)
+ *
+ */
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+    
+};
+
+# preamble -> Wiki LF explains -> https://github.com/icyphy/lingua-franca/wiki/Writing-Reactors-in-C#preamble
+
+preamble {=
+    #include "point_cloud_filter_transform_node.hpp" /* This is AUTOWARE node */
+    #include "utils.hpp"
+    #include "constants.hpp"
+    #include <cstdlib>
+    #include <string>
+=}
+
+reactor filter_and_transform (
+    bank_index:int = 0, 
+    config_namespaces:std::vector<string>({=std::vector<string>{"/lidar_front/filter_transform_vlp16_front", "/lidar_rear/filter_transform_vlp16_rear"}=}),
+    lidar_topic_names:std::vector<char*>({=std::vector<char*>{"/lidar_front/points_raw", "/lidar_rear/points_raw"}=})
+) {
+    output points_out:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    physical action ros2_bridge(0 msec, 200msec, "replace"):sensor_msgs::msg::PointCloud2*;
+
+    state count:int = 0;
+    state ros2_node: std::shared_ptr<autoware::perception::filters::point_cloud_filter_transform_nodes::PointCloud2FilterTransformNode>;
+    state spin_thread: std::thread;
+
+    preamble {=
+        #include "tag/api/tag.h"
+
+        trigger_handle_t ft_schedule_value(void* action, interval_t extra_delay, void* value, int length)
+        {
+            return lf_schedule_value(action, extra_delay, value, length);
+        }
+    =}
+
+    reaction (startup) -> ros2_bridge {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + PC_FILTER_TRANSFORM_PARAM;
+
+        char program_name[200], topic_cmd[200];
+        sprintf(program_name, "lf_filter_and_transform_%d", self->bank_index);
+        sprintf(topic_cmd, "points_in:=%s", self->lidar_topic_names[self->bank_index]);
+        char *argv[] = {program_name, "--ros-args", "--remap", topic_cmd, "--", NULL};
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            self->config_namespaces[self->bank_index],
+            5,
+            argv
+        );
+        self->ros2_node = std::make_shared<autoware::perception::filters::point_cloud_filter_transform_nodes::PointCloud2FilterTransformNode>(
+            nodeOptions,
+            ros2_bridge,
+            &ft_schedule_value
+        );
+        self->spin_thread = create_spin_thread(self->ros2_node);
+        lf_set_destructor(ros2_bridge, cpp_delete<sensor_msgs::msg::PointCloud2>);
+    =}
+
+    reaction (ros2_bridge) -> points_out {=
+        // Process some events
+        auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>(*ros2_bridge->value);
+        lf_set(points_out, msg);
+    =} 
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    fat = new filter_and_transform(
+        config_namespaces = {=std::vector<string>{"/lidar_front/filter_transform_vlp16_front", "/lidar_rear/filter_transform_vlp16_rear"}=}
+    );
+}
+

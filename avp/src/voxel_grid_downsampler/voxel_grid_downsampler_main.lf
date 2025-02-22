@@ -1,0 +1,45 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "voxel_cloud_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor voxel_grid_downsampler {
+    input points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    output points_out:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    
+    state ros2_node: std::shared_ptr<autoware::perception::filters::voxel_grid_nodes::VoxelCloudNode>;
+    
+    logical action downsample(0, 50msec, "replace"):std::shared_ptr<sensor_msgs::msg::PointCloud2>
+
+    reaction (startup) {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + SCAN_DOWNSAMPLER_MS3_CONFIG;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        
+        self->ros2_node = std::make_shared<autoware::perception::filters::voxel_grid_nodes::VoxelCloudNode>(nodeOptions);
+    =}
+        
+    reaction (points_in) -> downsample {=
+        lf_schedule_value(downsample, 0, new std::shared_ptr<sensor_msgs::msg::PointCloud2>(points_in->value), 1);
+    =}
+
+    reaction (downsample) -> points_out {=
+        self->ros2_node->callback(downsample->value);
+        auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>(self->ros2_node->m_voxelgrid_ptr->get());
+        lf_set(points_out, msg);
+	=}
+}
+
+main reactor {
+    vgd = new voxel_grid_downsampler();
+}

@@ -1,0 +1,10 @@
+unset(BUILD_TESTING)
+
+set(AUTOWARE_HOME $ENV{AUTOWARE_HOME})
+message(STATUS "Using ${AUTOWARE_HOME} as Autoware's home directory")
+
+find_package(ray_ground_classifier_nodes REQUIRED)
+
+include_directories(${AUTOWARE_HOME}/src/perception/filters/ray_ground_classifier_nodes/include/ray_ground_classifier_nodes)
+
+ament_target_dependencies( ${LF_MAIN_TARGET} PUBLIC ray_ground_classifier_nodes)

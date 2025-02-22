@@ -1,0 +1,45 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+    single-threaded: false
+};
+
+preamble {=
+    #include "lanelet2_map_provider_node.hpp" /* This is AUTOWARE node */
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor lanelet2_map_provider(num_requestors:int = 1) {
+    input[num_requestors] request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    output[num_requestors] map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+    
+    state ros2_node:autoware::lanelet2_map_provider::Lanelet2MapProviderNode*;
+    
+    reaction (startup) {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + LANELET2_MAP_PROVIDER_PARAM;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        
+        // This will lookup for a transform (tf2) over ROS from the ndt_map_publisher
+        self->ros2_node = new autoware::lanelet2_map_provider::Lanelet2MapProviderNode(nodeOptions);
+    =} 
+    
+    reaction (request) -> map {=
+        for (int i = 0; i < request_width; i++) {
+            if (request[i]->is_present) {
+                auto response = std::make_shared<autoware_auto_msgs::srv::HADMapService_Response>();
+                self->ros2_node->handle_request(request[i]->value, response);
+                auto msg = std::make_shared<autoware_auto_msgs::msg::HADMapBin>(response->map);
+                lf_set(map[i], std::move(msg));
+            }
+        }
+    =} 
+}
+
+main reactor {
+    lmp = new lanelet2_map_provider();
+}

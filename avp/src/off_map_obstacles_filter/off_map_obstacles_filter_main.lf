@@ -1,0 +1,59 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "off_map_obstacles_filter_node.hpp"
+    #include "had_map_utils/had_map_conversion.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor off_map_obstacles_filter (wait_for_map:time(100 msec)) {
+    mutable input original_bounding_boxes:std::shared_ptr<autoware_auto_msgs::msg::BoundingBoxArray>;
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+    
+    output modified_bounding_boxes:std::shared_ptr<autoware_auto_msgs::msg::BoundingBoxArray>;
+    output request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+
+
+    state ros2_node: std::shared_ptr<autoware::off_map_obstacles_filter_nodes::OffMapObstaclesFilterNode>;
+    state spin_thread: std::thread;
+
+	 reaction (startup) -> request {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + OFF_MAP_OBSTACLES_FILTER_PARAM;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+    
+        self->ros2_node = std::make_shared<autoware::off_map_obstacles_filter_nodes::OffMapObstaclesFilterNode>(nodeOptions);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+        
+		auto requestPtr = std::make_shared<autoware_auto_msgs::srv::HADMapService::Request>();
+  		requestPtr->requested_primitives.push_back(autoware_auto_msgs::srv::HADMapService::Request::FULL_MAP);
+  		lf_set(request, requestPtr);
+  		
+  		lf_print("Requesting map.");
+    =}
+    
+    reaction (original_bounding_boxes) -> modified_bounding_boxes {=        
+        self->ros2_node->process_bounding_boxes(original_bounding_boxes->value);
+        lf_set(modified_bounding_boxes, original_bounding_boxes->value);
+    =} 
+
+    reaction (map) {=
+        lf_print("Got the map.");
+        auto lanelet_map_ptr = std::make_shared<lanelet::LaneletMap>();
+        autoware::common::had_map_utils::fromBinaryMsg(*map->value, lanelet_map_ptr);
+        self->ros2_node->m_filter = std::make_unique<autoware::off_map_obstacles_filter_nodes::OffMapObstaclesFilter>(lanelet_map_ptr, self->ros2_node->m_overlap_threshold);
+        self->wait_for_map = 0;
+    =} 
+}
+
+main reactor {
+    nmp = new off_map_obstacles_filter();
+}

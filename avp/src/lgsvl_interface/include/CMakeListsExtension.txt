@@ -1,0 +1,12 @@
+unset(BUILD_TESTING)
+
+set(CMAKE_BUILD_TYPE Debug)
+
+set(AUTOWARE_HOME $ENV{AUTOWARE_HOME})
+message(STATUS "Using ${AUTOWARE_HOME} as Autoware's home directory")
+
+find_package(lgsvl_interface REQUIRED)
+
+include_directories(${AUTOWARE_HOME}/src/drivers/lgsvl_interface/include/lgsvl_interface)
+
+ament_target_dependencies( ${LF_MAIN_TARGET} PUBLIC lgsvl_interface)

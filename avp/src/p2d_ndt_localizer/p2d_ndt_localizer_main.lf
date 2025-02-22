@@ -1,0 +1,63 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "ndt_localizer_nodes.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor p2d_ndt_localizer {
+    input ndt_map_points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    input fused_downsampled_points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	
+    state ros2_node: std::shared_ptr<autoware::localization::ndt_nodes::P2DNDTLocalizerNode>;
+    state spin_thread: std::thread;
+
+    logical action fused_downsampled_points_process(0, 50msec, "replace"):std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    
+    reaction (startup) {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + NDT_LOCALIZER_PARAM;
+
+        rclcpp::NodeOptions node_options = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            "/**"
+        );
+        
+        // This constructor copies pose_initializer and stores it internally. Thus,
+        // pose_initializer does not need to be a state.
+        self->ros2_node = std::make_shared<autoware::localization::ndt_nodes::P2DNDTLocalizerNode>(
+        	"lfros2_ndt_localizer", node_options, autoware::localization::ndt_nodes::PoseInitializer_{}
+            );
+        self->spin_thread = create_spin_thread(self->ros2_node);
+    =}
+    
+    reaction (ndt_map_points_in) {=
+        // Converts the point in value to shared pointer
+        self->ros2_node->map_callback(ndt_map_points_in->value);
+        // Callback definitions:
+        // void map_callback(typename MapMsgT::ConstSharedPtr msg_ptr)
+        // void observation_callback(typename ObservationMsgT::ConstSharedPtr msg_ptr)
+        // Both MapMsgT and ObservationMsgT are given as PointCloud2 in the templated class definition of
+        // RelativeLocalizerNode in localization_node.hpp.
+	=}
+	
+    reaction (fused_downsampled_points_in) -> fused_downsampled_points_process {=
+        lf_schedule_value(fused_downsampled_points_process, 0, new std::shared_ptr<sensor_msgs::msg::PointCloud2>(fused_downsampled_points_in->value), 1);
+    =}
+
+	reaction (fused_downsampled_points_process) {=
+        self->ros2_node->observation_callback(fused_downsampled_points_process->value);   
+    =}
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    pnl = new p2d_ndt_localizer();
+}

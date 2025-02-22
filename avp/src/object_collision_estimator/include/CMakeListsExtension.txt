@@ -1,0 +1,21 @@
+unset(BUILD_TESTING)
+
+set(AUTOWARE_HOME $ENV{AUTOWARE_HOME})
+message(STATUS "Using ${AUTOWARE_HOME} as Autoware's home directory")
+
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(object_collision_estimator REQUIRED)
+find_package(autoware_auto_msgs REQUIRED)
+find_package(autoware_auto_tf2 REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(motion_common REQUIRED)
+find_package(time_utils REQUIRED)
+find_package(object_collision_estimator_nodes REQUIRED)
+
+include_directories(${AUTOWARE_HOME}/src/planning/object_collision_estimator_nodes/include/object_collision_estimator_nodes/)
+
+ament_target_dependencies( ${LF_MAIN_TARGET} PUBLIC object_collision_estimator_nodes)

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain id="0">
+    <Internal>
+      <MinimumSocketReceiveBufferSize>20MB</MinimumSocketReceiveBufferSize>
+    </Internal>
+    <General>
+      <AllowMulticast>false</AllowMulticast>
+      <NetworkInterfaceAddress>eth0</NetworkInterfaceAddress>
+      <DontRoute>true</DontRoute>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer address="rti"/>
+        <Peer address="federate-filter-and-transform-0"/>
+        <Peer address="federate-filter-and-transform-1"/>
+        <Peer address="federate-point-cloud-fusion"/>
+        <Peer address="federate-voxel-grid-downsampler"/>
+        <Peer address="federate-ray-ground-classifier"/>
+        <Peer address="federate-euclidean-cluster-detector"/>
+        <Peer address="federate-ndt-map-publisher"/>
+        <Peer address="federate-p2d-ndt-localizer"/>
+        <Peer address="federate-off-map-obstacles-filter"/>
+        <Peer address="federate-behavior-planner"/>
+        <Peer address="federate-parking-planner"/>
+        <Peer address="federate-lane-planner"/>
+        <Peer address="federate-global-planner"/>
+        <Peer address="federate-object-collision-estimator"/>
+        <Peer address="federate-lgsvl-interface"/>
+        <Peer address="federate-mpc-controller"/>
+        <Peer address="federate-robot-state-publisher"/>
+        <Peer address="federate-map-provider"/>
+        <Peer address="federate-lanelet2-visualizer"/>
+        <Peer address="rviz2-lgsvl"/>
+        <Peer address="avp-web-interface"/>
+      </Peers>
+    </Discovery>
+    <Compatibility>
+      <ManySocketsMode>false</ManySocketsMode>
+    </Compatibility>
+  </Domain>
+</CycloneDDS>
+
+<!-- useful CycloneDDS references
+https://github.com/eclipse-cyclonedds/cyclonedds/blob/master/docs/manual/options.md#cycloneddsdomaindiscoverypeerspeer
+https://cyclonedds.io/docs/cyclonedds/0.9.1/config.html
+-->

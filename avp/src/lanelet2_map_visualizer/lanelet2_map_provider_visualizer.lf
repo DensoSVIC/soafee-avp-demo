@@ -1,0 +1,56 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+    single-threaded: false
+};
+
+preamble {=
+    #include <visualization_msgs/msg/marker_array.hpp>
+    #include "lanelet2_map_provider_node.hpp" /* This is AUTOWARE node */
+    #include "lanelet2_map_visualizer.hpp" /* This is AUTOWARE node */
+    #include "had_map_utils/had_map_conversion.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor lanelet2_map_visualizer {
+
+    output request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+    
+    state ros2_node: std::shared_ptr<autoware::lanelet2_map_provider::Lanelet2MapVisualizer>;
+    state spin_thread: std::thread;
+    
+    reaction (startup)->request {=
+        try {
+            rclcpp::init(0, NULL);
+        } catch (...) { /*  Ignore */ }
+        
+        rclcpp::NodeOptions nodeOptions = rclcpp::NodeOptions();
+        
+        // This will lookup for a transform (tf2) over ROS from the ndt_map_publisher
+        self->ros2_node = std::make_shared<autoware::lanelet2_map_provider::Lanelet2MapVisualizer>(nodeOptions);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+
+        auto requestPtr = std::make_shared<autoware_auto_msgs::srv::HADMapService::Request>();
+  		requestPtr->requested_primitives.push_back(autoware_auto_msgs::srv::HADMapService::Request::FULL_MAP);
+  		lf_set(request, requestPtr);
+    =} 
+
+    reaction (map) {=
+        lf_print("Got the map.");
+
+        std::shared_ptr<lanelet::LaneletMap> sub_map = std::make_shared<lanelet::LaneletMap>();
+        autoware::common::had_map_utils::fromBinaryMsg(*map->value, sub_map);
+
+        self->ros2_node->visualize_map(sub_map);
+    =}
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    lmp = new lanelet2_map_visualizer();
+}

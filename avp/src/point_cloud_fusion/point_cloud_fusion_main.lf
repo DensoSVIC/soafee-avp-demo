@@ -1,0 +1,70 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "sensor_msgs/msg/point_cloud2.hpp"
+    #include "point_cloud_fusion_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor point_cloud_fusion(in_width: int = 2) {
+	input[in_width] points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	output points_out:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	
+	state ros2_node:autoware::perception::filters::point_cloud_fusion_nodes::PointCloudFusionNode*;
+
+    state point_in_0_seen:bool = false;
+    state point_in_1_seen:bool = false;
+	
+	reaction (startup) {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + VLP16_SIM_LEXUS_PC_FUSION_CONFIG;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        
+        self->ros2_node = new autoware::perception::filters::point_cloud_fusion_nodes::PointCloudFusionNode(nodeOptions);
+    =}
+        
+    reaction (points_in) -> points_out {=
+        // Make sure point clouds are not null
+        if (points_in[0]->is_present)
+        {
+            self->point_in_0_seen = true;
+        }
+        if (points_in[1]->is_present)
+        {
+            self->point_in_1_seen = true;
+        }
+
+        if (!(self->point_in_0_seen) || !(self->point_in_1_seen)) {
+            return;
+        }
+        
+        self->point_in_0_seen = false;
+        self->point_in_1_seen = false;
+
+        // lf_print("Calling pointcloud_callback %d %d.", points_in[0]->value->width, points_in[1]->value->width);
+        self->ros2_node->pointcloud_callback(
+            points_in[0]->value,
+            points_in[1]->value,
+            std::make_shared<const sensor_msgs::msg::PointCloud2>(),
+            std::make_shared<const sensor_msgs::msg::PointCloud2>(),
+            std::make_shared<const sensor_msgs::msg::PointCloud2>(),
+            std::make_shared<const sensor_msgs::msg::PointCloud2>(),
+            std::make_shared<const sensor_msgs::msg::PointCloud2>(),
+            std::make_shared<const sensor_msgs::msg::PointCloud2>()
+         );
+        auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>(self->ros2_node->m_cloud_concatenated);
+        lf_set(points_out, msg);
+	=}
+}
+
+main reactor {
+    pcf = new point_cloud_fusion();
+}

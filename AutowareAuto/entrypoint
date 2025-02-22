@@ -1,0 +1,6 @@
+#!/bin/bash
+
+export AUTOWARE_HOME=/opt/autoware/
+source /opt/autoware/install/setup.bash
+
+exec "$@"

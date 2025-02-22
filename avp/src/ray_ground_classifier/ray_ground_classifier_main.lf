@@ -1,0 +1,61 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "ray_ground_classifier_cloud_node.hpp"
+    #include <stdlib.h>
+    #include <string>
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor ray_ground_classifier {
+	input points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	output points_non_ground:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	
+	state ros2_node :std::shared_ptr<autoware::perception::filters::ray_ground_classifier_nodes::RayGroundClassifierCloudNode>;
+	
+    reaction (startup) {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + RAY_GROUND_CLASSIFIER_CONFIG;
+
+        char *argv[] = {
+            "ray_ground_classifier_cloud_node",
+            "--ros-args",
+            "--remap", "points_in:=/lidars/points_fused",
+            "--", 
+            NULL
+        };
+        
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**",
+            5,
+            argv
+        );
+        lf_print("Loaded node options");
+        
+        self->ros2_node = std::make_shared<autoware::perception::filters::ray_ground_classifier_nodes::RayGroundClassifierCloudNode>(nodeOptions);
+        
+        lf_print("Initialized node. PCL Size = %lu", self->ros2_node->m_pcl_size);
+        lf_print("Initialized node. Width = %d", self->ros2_node->m_nonground_msg.width);
+        lf_print("Initialized node. Frame id = %s", self->ros2_node->m_nonground_msg.header.frame_id.c_str());    
+    =}
+    
+    reaction (points_in) -> points_non_ground {=
+        self->ros2_node->callback(points_in->value);    
+        
+        if (self->ros2_node->m_has_failed) {
+            lf_print_warning("Ground classification failed.");
+            return;
+        }
+        auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>(self->ros2_node->m_nonground_msg);
+        lf_set(points_non_ground, msg);
+	=}
+}
+
+federated reactor {
+    pcf = new ray_ground_classifier();
+}

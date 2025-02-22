@@ -1,0 +1,159 @@
+/**
+ * The lgsvl_interface is the main connection between the control loop, running in LF, and the simulator running in ROS2.
+ * The simulator produces output every 100 msec and we have a deadline on giving back the new controller outputs of 50 msec.
+ */
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+};
+
+preamble {=
+    #include "lgsvl_interface/lgsvl_interface_node.hpp"
+    #include "lgsvl_interface/lgsvl_interface.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor lgsvl_interface {    
+    input state_command:std::shared_ptr<autoware_auto_msgs::msg::VehicleStateCommand>;
+    input vehicle_command:std::shared_ptr<autoware_auto_msgs::msg::VehicleControlCommand>;
+    output state_report:std::shared_ptr<autoware_auto_msgs::msg::VehicleStateReport>;
+    output vehicle_kinematic_state:std::shared_ptr<autoware_auto_msgs::msg::VehicleKinematicState>;
+    state sequence_number: uint32_t;
+    state ros2_node: std::shared_ptr<lgsvl_interface::LgsvlInterfaceNode>;
+    state spin_thread: std::thread;
+
+    reaction (startup) -> ros2_bridge_kinematic_state, ros2_bridge_state_report {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + LGSVL_INTERFACE_CONFIG;
+
+        // Remap topics using command-line arguments
+        char *argv[] = {
+            "lf_lgsvl_interface",
+            "--ros-args",
+            "--remap", "vehicle_control_cmd:=/lgsvl/vehicle_control_cmd", 
+            "--remap", "vehicle_state_cmd:=/lgsvl/vehicle_state_cmd",
+            "--remap", "state_report:=/lgsvl/state_report",
+            "--remap", "vehicle_odom:=/lgsvl/vehicle_odom",
+            "--remap", "gnss_odom:=/lgsvl/gnss_odom",
+            "--", 
+            NULL
+        };
+        
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**",
+            13,
+            argv
+        );
+        
+        // Tell the LGSVL interface to publish pose updates on tf topics, which means we need to use a thread to call rclcpp::spin.
+        nodeOptions.append_parameter_override("lgsvl.publish_tf", true);
+        
+        self->ros2_node = std::make_shared<lgsvl_interface::LgsvlInterfaceNode>(
+            nodeOptions,
+            ros2_bridge_kinematic_state,
+            ros2_bridge_state_report,
+            &lf_schedule_value
+        );
+        self->sequence_number = 0;
+        self->spin_thread = create_spin_thread(self->ros2_node);
+
+        // Use CPP destructors for the ros2 bridge physical actions.
+        lf_set_destructor(ros2_bridge_state_report, cpp_delete<autoware_auto_msgs::msg::VehicleStateReport>);
+        lf_set_destructor(ros2_bridge_kinematic_state, cpp_delete<autoware_auto_msgs::msg::VehicleKinematicState>);
+    =}
+    
+    // Comes from the LGSVL interface ros2 node
+    physical action ros2_bridge_kinematic_state : autoware_auto_msgs::msg::VehicleKinematicState*;
+    reaction (ros2_bridge_kinematic_state) -> vehicle_kinematic_state {=
+        // ros2_bridge_kinematic_state->value->sequence_number = self->sequence_number++;
+        auto msg = std::make_shared<autoware_auto_msgs::msg::VehicleKinematicState>(*ros2_bridge_kinematic_state->value);
+        lf_set(vehicle_kinematic_state, msg);
+    =}
+     
+    // Comes from the LGSVL interface ros2 node
+    physical action ros2_bridge_state_report : autoware_auto_msgs::msg::VehicleStateReport*;
+    reaction (ros2_bridge_state_report) -> state_report {=
+        auto msg = std::make_shared<autoware_auto_msgs::msg::VehicleStateReport>(*ros2_bridge_state_report->value);
+        lf_set(state_report, msg);
+        
+        // Update
+        if (self->ros2_node->m_state_machine) {
+            self->ros2_node->m_state_machine->update(self->ros2_node->m_interface->get_odometry(), self->ros2_node->m_interface->get_state_report());
+            self->ros2_node->state_machine_report();
+        }
+    =}
+    
+    // New state command (gear, blinkers etc.) coming from the behavior_planner.
+    // Has 40 msec logical delay
+    reaction (state_command) {=
+        self->ros2_node->m_last_state_command = *state_command->value;
+    =} STP(0) {=
+        instant_t intended_tag = state_command->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `state_command`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+
+        if (lag > MSEC(5)) {
+            lf_print_error("STP and deadline violation");
+        }
+        self->ros2_node->m_last_state_command = *state_command->value;
+    =} deadline(5 msec) {=
+        // Detect output jitter bound violations.
+        interval_t lag = lf_time_physical() - lf_time_logical();
+        lf_print_error(PRINTF_TIME" ms: Deadline violation on state_command! lag=" PRINTF_TIME" ms", lf_time_physical_elapsed()/MSEC(1), lag/MSEC(1));
+        self->ros2_node->m_last_state_command = *state_command->value;
+    =}
+    
+    
+    // Comes from the mpc_controller with a total of 40 msec logical delay
+    reaction (vehicle_command) {=
+        try {
+            self->ros2_node->on_command_message(*vehicle_command->value);
+        } catch (...) {
+            self->ros2_node->on_error(std::current_exception());
+        }
+    =} STP(0) {=
+        instant_t intended_tag = vehicle_command->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `vehicle_command`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+        if (lag > MSEC(5)) {
+            lf_print_error("STP and deadline violation");
+        } else {
+            try {
+                self->ros2_node->on_command_message(*vehicle_command->value);
+            } catch (...) {
+                self->ros2_node->on_error(std::current_exception());
+            }
+        }
+    =} deadline (5 msec) {=
+        // Detect output jitter bound violations.
+        interval_t lag = lf_time_physical() - lf_time_logical();
+        lf_print_error(PRINTF_TIME" ms: Deadline violation on vehicle_command! lag=" PRINTF_TIME" ms", lf_time_physical_elapsed()/MSEC(1), lag/MSEC(1));
+        // For now, still give the control output, even if it is late
+        try {
+            self->ros2_node->on_command_message(*vehicle_command->value);
+        } catch (...) {
+            self->ros2_node->on_error(std::current_exception());
+        }
+    =}
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    li = new lgsvl_interface();
+}

@@ -1,0 +1,39 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "euclidean_cluster_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor euclidean_cluster_detector {
+	input points_in:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	output bounding_boxes:std::shared_ptr<autoware_auto_msgs::msg::BoundingBoxArray>;
+	
+    state ros2_node: std::shared_ptr<autoware::perception::segmentation::euclidean_cluster_nodes::EuclideanClusterNode>;
+    state points_waiting:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+    
+    reaction (startup) {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + EUCLIDEAN_CLUSTER_DETECTOR_PARAM;
+
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        self->ros2_node = std::make_shared<autoware::perception::segmentation::euclidean_cluster_nodes::EuclideanClusterNode>(nodeOptions);
+    =}
+    
+    reaction (points_in) -> bounding_boxes {=
+        self->ros2_node->handle(points_in->value);
+        auto msg = std::make_shared<autoware_auto_msgs::msg::BoundingBoxArray>(self->ros2_node->m_boxes);
+        lf_set(bounding_boxes, msg);
+	=}
+}
+
+main reactor {
+    ecd = new euclidean_cluster_detector();
+}

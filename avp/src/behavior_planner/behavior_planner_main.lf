@@ -1,0 +1,232 @@
+/** 
+* The behavior_planner computes the trajectories which are given to the
+* mpc_controller. It has a complicated connection topology where there are
+* cycles from several outputs to inputs. The critical path is from
+* `vehicle_kinematic_state` -> `original_trjacetory` -> `modified_trajectory` ->
+* `control_trajectory`.
+*/ 
+
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "lanelet2_core/LaneletMap.h"
+    #include "had_map_utils/had_map_conversion.hpp"
+    #include "had_map_utils/had_map_query.hpp"
+    #include "autoware_auto_msgs/msg/vehicle_kinematic_state.hpp"
+    #include "autoware_auto_msgs/msg/vehicle_state_report.hpp"
+    #include "autoware_auto_msgs/msg/vehicle_state_command.hpp"
+    #include "behavior_planner.hpp"
+    #include "behavior_planner_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor behavior_planner {
+    // Global path from global planner.
+    input global_path:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    
+    // Map returned from map provider.
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+    
+    // Inputs from LGSVL interface.
+    input vehicle_kinematic_state:std::shared_ptr<autoware_auto_msgs::msg::VehicleKinematicState>;
+    input vehicle_state_report:std::shared_ptr<autoware_auto_msgs::msg::VehicleStateReport>;
+    
+    // For responses from lane and parking planners.
+    input lane_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    input parking_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    
+    // Modified trajectory from object collision estimator.
+    input modified_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    
+    // For request to map provider.
+    output map_request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    
+    // For sending vehicle state command to LGSVL interface.
+    output vehicle_state_command:std::shared_ptr<autoware_auto_msgs::msg::VehicleStateCommand>;
+    
+    // For requests to lane and parking planners.
+    output lane_route:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    output parking_route:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    
+    // Original trajectory to be consulted with object collision estimator.
+    output original_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    
+    // Trajectory to MPC controller.
+    output control_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+
+    state ros2_node: std::shared_ptr<autoware::behavior_planner_nodes::BehaviorPlannerNode>;
+    state spin_thread: std::thread;
+    state global_path_route:autoware_auto_msgs::msg::Route;
+    state previous_output_arrived_goal:std::chrono::time_point<std::chrono::system_clock>;
+    state previous_output:std::chrono::time_point<std::chrono::system_clock>;
+        
+    reaction (startup) {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + BEHAVIOR_PLANNER_PARAM;
+
+        rclcpp::NodeOptions node_options = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            "/**"
+        );
+        
+        node_options.append_parameter_override("enable_object_collision_estimator", true);
+        
+        self->ros2_node = std::make_shared<autoware::behavior_planner_nodes::BehaviorPlannerNode>(node_options);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+    =}
+
+    // Corresponds to BehaviorPlannerNode::on_vehicle_state_report.
+    reaction (vehicle_state_report) {=
+        self->ros2_node->on_vehicle_state_report(vehicle_state_report->value);
+    =} STP(0) {=
+        instant_t intended_tag = vehicle_state_report->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `vehicle_state_report`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+    =}
+    
+    // Corresponds to BehaviorPlannerNode::on_ego_state() and request_trajectory()
+    reaction (vehicle_kinematic_state) -> 
+            original_trajectory, 
+            vehicle_state_command, 
+            lane_route,
+            parking_route {=
+        self->ros2_node->on_ego_state(vehicle_kinematic_state->value);
+
+        // Check if any of the state variables are set. If so, send them.
+        if (self->ros2_node->m_lane_route != nullptr) {
+            lf_set(lane_route, self->ros2_node->m_lane_route);
+            self->ros2_node->m_lane_route.reset();
+        }
+
+        if (self->ros2_node->m_parking_route != nullptr) {
+            lf_set(parking_route, self->ros2_node->m_parking_route);
+            self->ros2_node->m_parking_route.reset();
+        }
+
+        if (self->ros2_node->m_state_command != nullptr) {
+            lf_set(vehicle_state_command, self->ros2_node->m_state_command);
+            self->ros2_node->m_state_command.reset();
+        }
+
+        // Send both trajectories to the modify-path.
+        if (self->ros2_node->m_trajectory != nullptr) {
+            lf_set(original_trajectory, self->ros2_node->m_trajectory);
+            self->ros2_node->m_trajectory.reset();
+        }
+
+        if (self->ros2_node->m_trajectory_to_modify != nullptr) {
+            lf_set(original_trajectory, self->ros2_node->m_trajectory_to_modify);
+            self->ros2_node->m_trajectory_to_modify.reset();
+        }
+    =} STP(0) {=
+        // Catch this STP violation because it will ruin the simultaneity downstream at mpc_controller.
+        instant_t intended_tag = vehicle_kinematic_state->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `vehicle_kinematic_state`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+    =} deadline(100 msec) {=
+        lf_print_error("Dropping stale vehicle_kinematic_state");
+    =}
+    
+    // Corresponds to BehaviorPlannerNode::on_route()
+    reaction (global_path) -> map_request {=
+       if (self->ros2_node->m_requesting_trajectory) {
+           lf_print("Route was rejected. Route cannot be updated while communicating with trajectory planners.");
+       } else if (!self->ros2_node->m_planner->is_vehicle_stopped(self->ros2_node->m_ego_state)) {
+           lf_print("Route was rejected. Route cannot be update while the vehicle is moving");
+       } else {
+           lf_print("Received route");
+           self->ros2_node->m_route = std::move(global_path->value);
+           auto request = std::make_shared<autoware_auto_msgs::srv::HADMapService::Request>();
+           request->requested_primitives.push_back(autoware_auto_msgs::srv::HADMapService::Request::FULL_MAP);
+           lf_set(map_request, request);
+       }
+    =} 
+
+    // Corresponds to BehaviorPlannerNode::map_response()
+    reaction (map) {=
+       lf_print("Received map");
+       // Pass a future to the callback function
+       self->ros2_node->map_response(
+           create_future_from_service<
+           autoware_auto_msgs::srv::HADMapService,
+           autoware_auto_msgs::msg::HADMapBin
+           >(map->value)
+       );
+    =} 
+    
+    // Corresponds to BehaviorPlannerNode::result_callback() for lane planner response.
+    reaction (lane_trajectory, parking_trajectory) {=
+        if (lane_trajectory->is_present && parking_trajectory->is_present) {
+            lf_print_error("Both trajectories present!");
+        }
+        auto trajectory = (lane_trajectory->is_present) ? 
+            *lane_trajectory->value.get() : *parking_trajectory->value.get();
+
+        if (!trajectory.points.empty()){
+            lf_print("Received trajectory from planner");
+        } else {
+            lf_print_error("Planner failed to calculate!!");
+        }
+
+        trajectory.header.frame_id = "map";
+        self->ros2_node->m_debug_trajectory_pub->publish(trajectory);
+
+        self->ros2_node->m_planner->set_trajectory(trajectory);
+
+        // finished requesting trajectory
+        self->ros2_node->m_requesting_trajectory = false;
+    =} 
+    
+    // Corresponds to BehaviorPlannerNode::modify_trajectory_response().
+    reaction (modified_trajectory) -> control_trajectory {=
+        // lf_print("Received modified trajectory.");
+        // Initialize with modified trajectory from object collision estimator.
+        auto trajectory = modified_trajectory->value;
+        
+        // Set current position with velocity zero to do emergency stop in case
+        // collision estimator fails or if there is obstacle on first point
+        if (trajectory->points.empty()) {
+            auto stopping_point = self->ros2_node->m_ego_state.state;
+            stopping_point.longitudinal_velocity_mps = 0.0;
+            trajectory->points.push_back(stopping_point);
+        }
+        lf_set(control_trajectory, trajectory);
+    =} STP(0) {=
+        // Catch this STP violation because it will ruin the simultaneity downstream at mpc_controller.
+        instant_t intended_tag = modified_trajectory->intended_tag.time;
+        interval_t lag = lf_time_physical() - intended_tag;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `modified_trajectory`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            intended_tag,
+            lf_time_logical(),
+            lf_time_logical() - intended_tag,
+            lag
+        );
+    =} deadline(100 msec) {=
+        lf_print_error("Discaring stale modified_trajectory");
+    =}
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    bp = new behavior_planner();
+}

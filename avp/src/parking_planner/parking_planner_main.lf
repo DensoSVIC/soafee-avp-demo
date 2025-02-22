@@ -1,0 +1,60 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "lanelet2_core/LaneletMap.h"
+    #include "had_map_utils/had_map_conversion.hpp"
+    #include "had_map_utils/had_map_query.hpp"
+    #include "parking_planner_nodes/parking_planner_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor parking_planner {
+    input route:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+
+    output request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    output trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+	
+    state route_msg:autoware_auto_msgs::msg::Route;
+    state ros2_node: std::shared_ptr<autoware::motion::planning::parking_planner_nodes::ParkingPlannerNode>;
+
+    reaction (startup) {=
+        std::string yaml_path = get_lfavp_config() + "/param/" + PARKING_PLANNER_PARAM;
+
+        rclcpp::NodeOptions node_options = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            "/**"
+        );
+        self->ros2_node = std::make_shared<autoware::motion::planning::parking_planner_nodes::ParkingPlannerNode>(node_options);
+    =}
+
+    reaction (route) -> request {=
+        self->route_msg = *route->value;
+        auto request_msg = std::make_shared<autoware_auto_msgs::srv::HADMapService_Request>(
+        	self->ros2_node->create_map_request(self->route_msg));
+        	
+        lf_set(request, request_msg);
+	=}
+
+    reaction (map) -> trajectory {=
+	    std::shared_ptr<lanelet::LaneletMap> lanelet_map_ptr = std::make_shared<lanelet::LaneletMap>();
+	    autoware::common::had_map_utils::fromBinaryMsg(*map->value, lanelet_map_ptr);
+
+        auto trajectory_msg = std::make_shared<autoware_auto_msgs::msg::Trajectory>(
+            self->ros2_node->plan_trajectory(self->route_msg, lanelet_map_ptr));
+        
+        // Only publish the trajectory if it is valid        
+        if (self->ros2_node->is_trajectory_valid(*trajectory_msg)) {
+            lf_set(trajectory, trajectory_msg);
+        }
+	=}
+}
+
+main reactor {
+    pp = new parking_planner();
+}

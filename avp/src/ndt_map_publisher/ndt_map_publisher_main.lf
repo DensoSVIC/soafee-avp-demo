@@ -1,0 +1,38 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "sensor_msgs/msg/point_cloud2.hpp"
+    #include "map_publisher.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor ndt_map_publisher {
+    output points_out:std::shared_ptr<sensor_msgs::msg::PointCloud2>;
+	
+    state ros2_node: std::shared_ptr<autoware::localization::ndt_nodes::NDTMapPublisherNode>;
+    state spin_thread: std::thread;
+    
+
+    reaction (startup) -> points_out {=
+        static std::string yaml_path = get_lfavp_config() + "/param/" + NDT_MAP_PUBLISHER_PARAM;
+
+        rclcpp::NodeOptions node_options = get_node_options_from_yaml(
+            yaml_path.c_str(),
+            "/**"
+        );
+        self->ros2_node = std::make_shared<autoware::localization::ndt_nodes::NDTMapPublisherNode>(node_options);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+        
+        auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>(self->ros2_node->m_map_pc);
+        lf_set(points_out, msg);
+    =}
+}
+
+main reactor {
+    nmp = new ndt_map_publisher();
+}

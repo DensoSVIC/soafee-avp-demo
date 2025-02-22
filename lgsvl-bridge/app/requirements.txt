@@ -1,0 +1,5 @@
+environs == 11.2.1
+numpy == 1.17.4
+setuptools == 45.2.0
+websocket-client == 1.8.0
+websockets == 8.1

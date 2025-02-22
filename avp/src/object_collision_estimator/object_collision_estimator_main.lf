@@ -1,0 +1,110 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"],
+    single-threaded: false
+};
+
+preamble {=
+    #include "object_collision_estimator_node.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+// Using here an STP_offset of 10 msec to account the incoming latency of 
+// `original_trajectory`.
+reactor object_collision_estimator(STP_offset = 10 msec) {
+    preamble {=
+        #include "visualize.hpp"
+    =}
+
+    input filtered_lidar_boxes:std::shared_ptr<autoware_auto_msgs::msg::BoundingBoxArray>;
+    input original_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+    output modified_trajectory:std::shared_ptr<autoware_auto_msgs::msg::Trajectory>;
+	
+    state ros2_node: std::shared_ptr<motion::planning::object_collision_estimator_nodes::ObjectCollisionEstimatorNode>;
+    state spin_thread: std::thread;
+
+	reaction (startup) {= 
+        std::string yaml_path = get_lfavp_config() + "/param/" + OBJ_COLLISION_EST_PARAM;
+       
+        rclcpp::NodeOptions nodeOptions = get_node_options_from_yaml(
+            yaml_path.c_str(), 
+            "/**"
+        );
+        
+        self->ros2_node = std::make_shared<motion::planning::object_collision_estimator_nodes::ObjectCollisionEstimatorNode>(nodeOptions);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+    =}
+    
+    reaction (filtered_lidar_boxes) {=
+        self->ros2_node->on_bounding_box(filtered_lidar_boxes->value);
+    =} STP(0) {=
+        // An STP violation means that the total execution time of the LiDAR pipeline exceeds
+        // the logical delay on the connection from `off_map_obstacles_filter` to us.
+        // We allow this as long as the lag wrt the intended tag is less than 200 msec
+        interval_t lag = lf_time_physical() - filtered_lidar_boxes->intended_tag.time;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `filtered_lidar_boxes`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            filtered_lidar_boxes->intended_tag.time,
+            lf_time_logical(),
+            lf_time_logical() - filtered_lidar_boxes->intended_tag.time,
+            lag
+        );
+        
+        if (lag < MSEC(200)) {
+            self->ros2_node->on_bounding_box(filtered_lidar_boxes->value);
+        } else {
+            lf_print_error("Dropping lidar input due to too high lag");
+        }
+
+    =} deadline (200 msec) {=
+        // A deadline violation means that the LiDAR events arrived in time, but have been delayed
+        // on our event queue due to excessive processing time of the trajectories. In this case,
+        // we drop the stale point clouds and instead wait for new ones.
+        lf_print_warning(PRINTF_TIME ": Discarding stale (" PRINTF_TIME ") filtered_lidar_boxes event", lf_time_physical_elapsed(), lf_time_physical() - lf_time_logical());
+    =}
+	
+	reaction(original_trajectory) -> modified_trajectory {=
+        lf_set(modified_trajectory, original_trajectory->value);
+        
+        // m_estimator performs the collision estimation and the trajectory will get updated inside
+        self->ros2_node->m_estimator->updatePlan(*modified_trajectory->value);
+
+        // ROS stuff to make rviz2 show pretty boxes:
+        // publish trajectory bounding box for visualization
+        auto trajectory_bbox = self->ros2_node->m_estimator->getTrajectoryBoundingBox();
+        trajectory_bbox.header = modified_trajectory->value->header;
+        auto marker = motion::planning::object_collision_estimator_nodes::toVisualizationMarkerArray(trajectory_bbox, modified_trajectory->value->points.size());
+        self->ros2_node->m_trajectory_bbox_pub->publish(marker);
+    =} STP(0) {=
+        // An STP violation here means that we handled some input from filtered_lidar_boxes
+        // and then later an "earlier" original_trajectory arrived.
+        interval_t lag = lf_time_physical() - original_trajectory->intended_tag.time;
+        lf_print_warning(PRINTF_TIME " ms: STP violation on `origingal_trajectory`. Intended tag=" PRINTF_TIME ", Got tag=" PRINTF_TIME " delta=" PRINTF_TIME ". Original lag=" PRINTF_TIME, 
+            lf_time_physical_elapsed() / MSEC(1), 
+            original_trajectory->intended_tag.time,
+            lf_time_logical(),
+            lf_time_logical() - original_trajectory->intended_tag.time,
+            lag
+        );
+        
+        // For now we still handle it (except skip the rviz stuff.
+        lf_set(modified_trajectory, original_trajectory->value);
+        self->ros2_node->m_estimator->updatePlan(*modified_trajectory->value);
+
+    =} deadline (100 msec) {=
+
+        lf_print_warning(PRINTF_TIME ": Deadline violation on original_trajectory. ", lf_time_physical_elapsed());
+        // Send the trajectory back unmodified
+        lf_set(modified_trajectory, original_trajectory->value);
+        // FIXME: still do collision estimation?
+    =}
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    oce = new object_collision_estimator();
+}

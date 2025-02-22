@@ -1,0 +1,44 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+    single-threaded: false
+};
+
+preamble {=
+    #include "robot_state_publisher/robot_state_publisher.hpp"
+    #include "utils.hpp"
+    #include "constants.hpp"
+    #include <fstream>
+=}
+
+reactor robot_state_publisher {
+    state ros2_node: std::shared_ptr<robot_state_publisher::RobotStatePublisher>;
+    state spin_thread: std::thread;
+    
+    reaction (startup) {=
+        // Parse the urdf/xml file
+        std::string urdf_file_name = get_lfavp_config() + "/urdf/" + VEHICLE_URDF;
+        std::ifstream f(urdf_file_name); 
+        std::stringstream ss;
+        ss << f.rdbuf();
+        
+        try {
+            rclcpp::init(0, NULL);
+        } catch (...) { /*  Ignore */ }
+        
+        rclcpp::NodeOptions nodeOptions;
+        
+        nodeOptions.append_parameter_override("robot_description", ss.str());
+                
+        self->ros2_node = std::make_shared<robot_state_publisher::RobotStatePublisher>(nodeOptions);
+        self->spin_thread = create_spin_thread(self->ros2_node);
+    =}
+
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    li = new robot_state_publisher();
+}

@@ -1,0 +1,72 @@
+target CCpp {
+    cmake-include: "include/CMakeListsExtension.txt",
+    files: ["../include/utils.hpp", "../include/constants.hpp"], 
+    single-threaded: false 
+};
+
+preamble {=
+    #include "lanelet2_global_planner_node.hpp" /* This is AUTOWARE node */
+    #include "utils.hpp"
+    #include "constants.hpp"
+=}
+
+reactor global_planner {
+    input vehicle_kinematic_state:std::shared_ptr<autoware_auto_msgs::msg::VehicleKinematicState>;
+    input map:std::shared_ptr<autoware_auto_msgs::msg::HADMapBin>;
+    output global_path:std::shared_ptr<autoware_auto_msgs::msg::Route>;
+    output map_request:std::shared_ptr<autoware_auto_msgs::srv::HADMapService_Request>;
+    physical action ros2_bridge:autoware_auto_msgs::msg::Route*;
+    
+    state ros2_node: std::shared_ptr<autoware::planning::lanelet2_global_planner_nodes::Lanelet2GlobalPlannerNode>
+    state spin_thread: std::thread;
+    
+    reaction (startup) ->  map_request, ros2_bridge {=
+        // Use a try - catch for now so that if the rclcpp context is already initialized,
+        // ROS doesn't throw a tantrum.
+        try {
+            rclcpp::init(0, NULL);
+        } catch (...) { /*  Ignore */ }
+        
+        rclcpp::NodeOptions nodeOptions = rclcpp::NodeOptions();
+        
+        self->ros2_node = std::make_shared<autoware::planning::lanelet2_global_planner_nodes::Lanelet2GlobalPlannerNode>(
+            nodeOptions,
+            ros2_bridge,
+            &lf_schedule_value
+        );
+        self->spin_thread = create_spin_thread(self->ros2_node);
+
+        auto request = std::make_shared<autoware_auto_msgs::srv::HADMapService_Request>();
+        request->requested_primitives.push_back(
+            autoware_auto_msgs::srv::HADMapService_Request::FULL_MAP);
+        
+        lf_set(map_request, request);
+    =}
+    
+    reaction (vehicle_kinematic_state) {=
+        self->ros2_node->current_pose_cb(vehicle_kinematic_state->value);
+    =} 
+    
+    reaction(ros2_bridge) -> global_path {=
+        auto msg = std::make_shared<autoware_auto_msgs::msg::Route>(*ros2_bridge->value);
+        lf_set(global_path, msg);
+    =} 
+
+    reaction (map) {=
+        // Convert binary map msg to lanelet2 map and set the map for global path planner
+        self->ros2_node->lanelet2_global_planner->osm_map = std::make_shared<lanelet::LaneletMap>();
+        autoware::common::had_map_utils::fromBinaryMsg(*map->value, self->ros2_node->lanelet2_global_planner->osm_map);
+
+        // parse lanelet global path planner elements
+        self->ros2_node->lanelet2_global_planner->parse_lanelet_element();
+    =} 
+    
+    reaction (shutdown) {=
+        self->spin_thread.join();
+    =}
+}
+
+main reactor {
+    gp = new global_planner();
+}
+

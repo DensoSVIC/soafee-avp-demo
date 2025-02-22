@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    overlap_threshold: 0.2
+    publish_polygon_viz: true
