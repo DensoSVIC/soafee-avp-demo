@@ -30,8 +30,15 @@ COPY lgsvl-bridge/app/requirements.txt /app/PythonAPI/requirements.txt
 # read requirements.txt then add version specifiers to setup.py
 WORKDIR /app/PythonAPI
 RUN while IFS= read -r line; do \
-        package=$(echo "$line" | cut -d= -f1 | xargs); \
-        sed -i -E "s/(['\"]$package['\"][[:space:]]*)([,)]|$)/'$line'\2/" setup.py; \
+        # Skip empty lines and lines starting with #
+        [ -z "$line" ] && continue; \
+        echo "$line" | grep -qE '^\s*#' && continue; \
+        pkg=$(echo "$line" | cut -d= -f1 | cut -d'<' -f1 | cut -d'>' -f1 | xargs); \
+        if grep -qE "[\"']$pkg[\"']" setup.py; then \
+            sed -i -E "s/(['\"]$pkg['\"][[:space:]]*)([,)]|$)/'$line'\2/" setup.py; \
+        else \
+            sed -i -E "/install_requires\s*=\s*\[/ a \ \ \ \ \ \ \ \ '$line'," setup.py; \
+        fi; \
     done < requirements.txt
 RUN /app/PythonAPI/setup.py install --user
 

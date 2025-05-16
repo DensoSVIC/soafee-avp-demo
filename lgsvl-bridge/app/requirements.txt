@@ -3,3 +3,5 @@ numpy == 1.17.4
 setuptools == 45.2.0
 websocket-client == 1.8.0
 websockets == 8.1
+marshmallow == 3.22.0
+python-dotenv == 1.1.0
