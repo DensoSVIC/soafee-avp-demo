@@ -45,6 +45,7 @@ ENV LC_ALL=en_US.UTF-8
 
 # install utilities
 RUN apt-get install -y -q --no-install-recommends \
+        software-properties-common \
         ca-certificates \
         curl \
         git \
@@ -87,9 +88,14 @@ RUN apt-get install -y -q \
 
 # add ros distro to apt
 # tag: foxy/2023-06-20
-RUN curl -sSL https://github.com/ros/rosdistro/raw/refs/tags/foxy/2023-06-20/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-RUN echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu focal main" \
-    | tee /etc/apt/sources.list.d/ros2.list
+
+RUN export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F'"' '{print $4}') \
+    && UBUNTU_CODENAME=$(. /etc/os-release && echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}}) \
+    && curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.${UBUNTU_CODENAME}_all.deb" \
+    && dpkg -i /tmp/ros2-apt-source.deb \
+    && apt-get update \
+    && rm /tmp/ros2-apt-source.deb
+
 RUN apt-get update -q
 
 # ROS depends on an upgraded version of libssl1.1, but 1.1.1f-1ubuntu2.24 breaks
